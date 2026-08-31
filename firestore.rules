@@ -1,96 +1,92 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Helper functions
-    function isSignedIn() {
-      return request.auth != null;
+    function verified() { return request.auth != null && request.auth.token.email_verified == true; }
+    function owner(uid) { return verified() && request.auth.uid == uid; }
+    function teacher() {
+      return verified() &&
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/teachers/$(request.auth.uid)).data.role == 'teacher';
     }
-
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function text(value, max) { return value is string && value.size() <= max; }
+    function natural(value) { return value is int && value >= 0 && value <= 100000000; }
+    function validProfile(d, uid) {
+      return d.keys().hasOnly(['id','email','name','lastName','nickname','courseGroup','role','avatar','spaceship','level','xp','cosmicCredits','batteries','streakDays','lastActiveDate','galaxiesExplored','missionsCompleted','exercisesSolved','accuracy','bestStreak','unlockedItems','equippedItems','badges']) &&
+        d.id == uid && d.email == request.auth.token.email &&
+        text(d.name,60) && d.name.size() > 0 && text(d.lastName,60) && d.lastName.size() > 0 &&
+        text(d.nickname,60) && text(d.courseGroup,30) &&
+        d.role in ['student','teacher'] && text(d.avatar,100) && text(d.spaceship,100) &&
+        natural(d.level) && d.level >= 1 && natural(d.xp) && natural(d.cosmicCredits) &&
+        d.batteries is int && d.batteries >= 0 && d.batteries <= 3 &&
+        natural(d.streakDays) && text(d.lastActiveDate,40) && natural(d.galaxiesExplored) &&
+        natural(d.missionsCompleted) && natural(d.exercisesSolved) &&
+        d.accuracy is number && d.accuracy >= 0 && d.accuracy <= 100 && natural(d.bestStreak) &&
+        d.unlockedItems is list && d.unlockedItems.size() <= 100 &&
+        d.badges is list && d.badges.size() <= 100 &&
+        d.equippedItems is map && d.equippedItems.keys().hasOnly(['avatar','spaceship','trail','banner']) &&
+        text(d.equippedItems.avatar,100) && text(d.equippedItems.spaceship,100) &&
+        text(d.equippedItems.trail,100) && text(d.equippedItems.banner,100);
     }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+    match /teachers/{uid} {
+      allow get: if owner(uid);
+      allow list, write: if false;
     }
-
-    function isTeacher() {
-      return isSignedIn() && (
-        exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) ||
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher'
-      );
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    function isValidUser(data) {
-      return data.keys().hasAll(['id', 'email', 'name', 'nickname', 'role', 'level', 'xp', 'batteries']) &&
-        data.id is string && data.id.size() <= 128 &&
-        data.email is string && data.email.size() <= 256 &&
-        data.name is string && data.name.size() <= 100 &&
-        data.nickname is string && data.nickname.size() <= 50 &&
-        data.role in ['student', 'teacher'] &&
-        data.level is number && data.level >= 1 &&
-        data.xp is number && data.xp >= 0 &&
-        data.batteries is number && data.batteries >= 0 && data.batteries <= 3;
-    }
-
-    function isValidProgress(data) {
-      return data.keys().hasAll(['missionId', 'userId', 'completed', 'stars']) &&
-        data.missionId is string && data.missionId.size() <= 128 &&
-        data.userId is string && data.userId.size() <= 128 &&
-        data.completed is bool &&
-        data.stars is number && data.stars >= 0 && data.stars <= 3;
-    }
-
-    // Default deny
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    // Users collection
-    match /users/{userId} {
-      allow get: if isOwner(userId) || isTeacher();
-      allow list: if isTeacher();
-      
-      // On create, students cannot set themselves as teacher
-      allow create: if isSignedIn() && isOwner(userId) && isValidId(userId) &&
-        isValidUser(incoming()) && (incoming().role == 'student' || isTeacher());
-      
-      // On update, users cannot change their role or email
-      allow update: if (isOwner(userId) && isValidUser(incoming()) &&
-        incoming().role == existing().role &&
-        incoming().id == existing().id &&
-        incoming().email == existing().email) || isTeacher();
-      
-      allow delete: if isTeacher();
-
-      // Subcollection for mission progress
+    match /users/{uid} {
+      allow get: if owner(uid) || teacher();
+      allow list: if teacher();
+      allow create: if owner(uid) && validProfile(request.resource.data, uid) &&
+        (request.resource.data.role == 'student' || teacher()) &&
+        request.resource.data.xp == 0 && request.resource.data.missionsCompleted == 0;
+      allow update: if owner(uid) && validProfile(request.resource.data, uid) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.id == resource.data.id && request.resource.data.email == resource.data.email;
+      allow delete: if false;
       match /progress/{missionId} {
-        allow get, list: if isOwner(userId) || isTeacher();
-        allow create, update: if isOwner(userId) && isValidId(missionId) &&
-          isValidProgress(incoming()) && incoming().userId == userId;
-        allow delete: if isTeacher();
+        allow read: if owner(uid) || teacher();
+        allow create, update: if owner(uid) &&
+          request.resource.data.keys().hasOnly(['missionId','completed','stars','highScore','attemptsCount','errorsCount','lastAttemptDate']) &&
+          request.resource.data.missionId == missionId && text(missionId,128) &&
+          request.resource.data.completed is bool &&
+          request.resource.data.stars is int && request.resource.data.stars >= 0 && request.resource.data.stars <= 3 &&
+          natural(request.resource.data.highScore) && natural(request.resource.data.attemptsCount) &&
+          natural(request.resource.data.errorsCount) && text(request.resource.data.lastAttemptDate,40);
+        allow delete: if false;
+      }
+      match /answers/{answerId} {
+        allow read: if owner(uid) || teacher();
+        allow create, update: if owner(uid) &&
+          request.resource.data.keys().hasOnly(['id','questionId','studentId','missionId','numberOfAttempts','correct','firstAttemptCorrect','batteryLost','timestamp']) &&
+          request.resource.data.id == answerId && request.resource.data.studentId == uid &&
+          text(request.resource.data.questionId,128) && text(request.resource.data.missionId,128) &&
+          request.resource.data.numberOfAttempts is int &&
+          request.resource.data.numberOfAttempts >= 1 && request.resource.data.numberOfAttempts <= 2 &&
+          request.resource.data.correct is bool && request.resource.data.firstAttemptCorrect is bool &&
+          request.resource.data.batteryLost is bool && text(request.resource.data.timestamp,40);
+        allow delete: if false;
       }
     }
-
-    // Weekly challenges
-    match /weeklyChallenges/{challengeId} {
-      allow read: if isSignedIn();
-      allow write: if isTeacher();
+    match /courseEvents/{id} {
+      allow read: if verified();
+      allow create, update: if teacher() &&
+        request.resource.data.keys().hasOnly(['id','title','description','multiplierXP','active','remainingHours','badgeRewardId','bannerColor']) &&
+        request.resource.data.id == id && text(request.resource.data.title,100) &&
+        text(request.resource.data.description,2000) && request.resource.data.active is bool;
+      allow delete: if false;
     }
-
-    // Leaderboard cache collection
-    match /leaderboard/{entryId} {
-      allow read: if isSignedIn();
-      allow write: if isTeacher() || (isSignedIn() && incoming().id == request.auth.uid);
+    match /weeklyChallenges/{id} {
+      allow read: if verified();
+      allow write: if false;
     }
+    match /leaderboard/{uid} {
+      allow read: if verified();
+      allow create, update: if owner(uid) &&
+        request.resource.data.keys().hasOnly(['id','nickname','xp']) &&
+        request.resource.data.id == uid && text(request.resource.data.nickname,60) && natural(request.resource.data.xp) &&
+        get(/databases/$(database)/documents/users/$(uid)).data.role == 'student' &&
+        request.resource.data.nickname == get(/databases/$(database)/documents/users/$(uid)).data.nickname &&
+        request.resource.data.xp == get(/databases/$(database)/documents/users/$(uid)).data.xp;
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
   }
 }

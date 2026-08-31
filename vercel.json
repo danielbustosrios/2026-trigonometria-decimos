@@ -1,0 +1,6 @@
+{
+  "framework": "vite",
+  "installCommand": "npx --yes pnpm@11.19.0 install --frozen-lockfile --ignore-scripts",
+  "buildCommand": "npm run lint && npm test && npm run build",
+  "outputDirectory": "dist"
+}
