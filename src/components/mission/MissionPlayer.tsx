@@ -294,7 +294,7 @@ export const MissionPlayer: React.FC<MissionPlayerProps> = ({
       ...user,
       xp: isRiskFreeMode ? user.xp : user.xp + totalXP,
       cosmicCredits: isRiskFreeMode ? user.cosmicCredits : user.cosmicCredits + totalCredits,
-      missionsCompleted: user.missionsCompleted + 1,
+      missionsCompleted: Object.values(StorageService.getAllProgress()).filter(p => p.completed).length,
       exercisesSolved: user.exercisesSolved + totalQuestions,
     };
     StorageService.saveUser(updatedUser);

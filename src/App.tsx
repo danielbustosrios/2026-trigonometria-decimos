@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { CosmicBackground } from './components/common/CosmicBackground';
 import { Navbar, ActiveTab } from './components/layout/Navbar';
-import { AuthPage } from './components/auth/AuthPage';
-import { AuthModal } from './components/auth/AuthModal';
 import { LevelUpModal } from './components/common/LevelUpModal';
 import { StudentHome } from './components/dashboard/StudentHome';
 import { StarMap } from './components/map/StarMap';
@@ -19,35 +17,16 @@ import { UserProfile, Mission } from './types';
 import { StorageService, getLevelInfo } from './services/storageService';
 
 export const App: React.FC = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() =>
-    StorageService.isAuthenticated()
-  );
   const [user, setUser] = useState<UserProfile>(() => StorageService.getUser());
-  const [activeTab, setActiveTab] = useState<ActiveTab>('home');
-  const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<ActiveTab>(user.role === 'teacher' ? 'teacher' : 'home');
   const [activeMission, setActiveMission] = useState<Mission | null>(null);
   const [activeArcade, setActiveArcade] = useState<'asteroid' | 'memory' | null>(null);
   const [levelUpEvent, setLevelUpEvent] = useState<number | null>(null);
 
-  // Handle Logout
-  const handleLogout = () => {
-    StorageService.logout();
-    setIsAuthenticated(false);
-    setIsAuthOpen(false);
-    setActiveMission(null);
-    setActiveArcade(null);
-  };
-
-  // Handle successful login or registration
-  const handleLoginSuccess = (loggedUser: UserProfile) => {
-    setUser(loggedUser);
-    setIsAuthenticated(true);
-    setIsAuthOpen(false);
-    if (loggedUser.role === 'teacher') {
-      setActiveTab('teacher');
-    } else {
-      setActiveTab('home');
-    }
+  const [logoutError, setLogoutError] = useState('');
+  const handleLogout = async () => {
+    try { await StorageService.logout(); }
+    catch { setLogoutError('No se pudo cerrar sesión: espera a que se guarden tus avances y vuelve a intentarlo.'); }
   };
 
   // Monitor level up
@@ -73,11 +52,6 @@ export const App: React.FC = () => {
     handleUpdateUser(freshUser);
   };
 
-  // If not authenticated, render the initial landing / auth page directly
-  if (!isAuthenticated) {
-    return <AuthPage onLoginSuccess={handleLoginSuccess} />;
-  }
-
   return (
     <div className="relative min-h-screen bg-[#020617] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
       {/* Background Starfield Canvas */}
@@ -89,9 +63,10 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         onLogout={handleLogout}
-        onOpenAuth={() => setIsAuthOpen(true)}
+        onOpenAuth={handleLogout}
       />
 
+      {logoutError && <p role="alert" className="relative z-20 p-4 text-amber-300">{logoutError}</p>}
       {/* Main Viewport Router */}
       <main className="relative z-10 flex-1 pb-16">
         {activeTab === 'home' && (
@@ -132,7 +107,7 @@ export const App: React.FC = () => {
 
         {activeTab === 'profile' && <StudentProfile user={user} onLogout={handleLogout} />}
 
-        {activeTab === 'teacher' && <TeacherDashboard user={user} />}
+        {activeTab === 'teacher' && user.role === 'teacher' && <TeacherDashboard user={user} />}
       </main>
 
       {/* Fullscreen Interactive Mission Player Modal */}
@@ -175,12 +150,7 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* Profile Switcher / Auth Modal */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        onLoginSuccess={handleLoginSuccess}
-      />
+
     </div>
   );
 };

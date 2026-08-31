@@ -266,21 +266,12 @@ export const Navbar: React.FC<NavbarProps> = ({
               <GraduationCap className="w-3.5 h-3.5 text-emerald-300" />
               Panel Docente
             </button>
-          ) : (
-            <button
-              onClick={() => setActiveTab('teacher')}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs text-slate-400 hover:text-emerald-300 hover:bg-slate-800/60 border border-slate-800 transition-all cursor-pointer"
-              title="Vista previa del docente"
-            >
-              <Shield className="w-3 h-3 text-emerald-400" />
-              <span className="hidden md:inline">Acceso Docente</span>
-            </button>
-          )}
+          ) : null}
 
           <button
-            onClick={onOpenAuth}
+            onClick={onLogout}
             className="p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-colors cursor-pointer"
-            title="Cambiar sesión / Registro"
+            title="Cerrar sesión"
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>

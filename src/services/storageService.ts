@@ -1,31 +1,9 @@
-import {
-  UserProfile,
-  StudentMissionProgress,
-  LeaderboardEntry,
-  WeeklyChallenge,
-  CourseEvent,
-  RewardItem,
-  QuestionAnswerLog,
-} from '../types';
-import {
-  INITIAL_STUDENT_USER,
-  INITIAL_TEACHER_USER,
-  MOCK_STUDENTS,
-  WEEKLY_CHALLENGES,
-  COURSE_EVENTS,
-  REWARD_ITEMS,
-  GALAXIES_DATA,
-} from '../data/mockData';
+import { UserProfile, StudentMissionProgress, LeaderboardEntry, WeeklyChallenge, CourseEvent, RewardItem, QuestionAnswerLog } from '../types';
+import { collection, doc, getDoc, getDocs, setDoc } from 'firebase/firestore';
+import { signOut, type User } from 'firebase/auth';
+import { auth, db } from './cloud';
+import { publicRankingEntry } from './ranking';
 
-const USER_STORAGE_KEY = 'vieco_trig_user';
-const SESSION_AUTH_KEY = 'vieco_trig_session_auth';
-const PROGRESS_STORAGE_KEY = 'vieco_trig_progress';
-const LEADERBOARD_STORAGE_KEY = 'vieco_trig_leaderboard';
-const CHALLENGES_STORAGE_KEY = 'vieco_trig_challenges';
-const EVENTS_STORAGE_KEY = 'vieco_trig_events';
-const QUESTION_LOGS_STORAGE_KEY = 'vieco_trig_question_logs';
-
-// Configurable Attempt Multipliers
 export const ATTEMPT_CONFIG = {
   MAX_ATTEMPTS_PER_QUESTION: 2,
   FIRST_ATTEMPT_XP_MULTIPLIER: 1.0, // 100% XP on 1st attempt (e.g. +20 XP)
@@ -91,200 +69,120 @@ export function getLevelInfo(xp: number) {
   };
 }
 
+
+type SyncState = 'saved' | 'saving' | 'error';
+let profile: UserProfile | null = null;
+let progress: Record<string, StudentMissionProgress> = {};
+let logs: QuestionAnswerLog[] = [];
+let challenges: WeeklyChallenge[] = [];
+let events: CourseEvent[] = [];
+let syncState: SyncState = 'saved';
+const subscribers = new Set<() => void>();
+let queue: Array<{ uid: string; path: string; data: object }> = [];
+let draining = false;
+const publish = (state: SyncState) => { syncState = state; subscribers.forEach(fn => fn()); };
+const clean = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+
 export class StorageService {
-  static isAuthenticated(): boolean {
-    try {
-      const auth = localStorage.getItem(SESSION_AUTH_KEY);
-      return auth === 'true';
-    } catch (e) {
-      return false;
-    }
+  static subscribe = (fn: () => void) => { subscribers.add(fn); return () => { subscribers.delete(fn); }; };
+  static getSyncState = () => syncState;
+  static isAuthenticated() { return !!profile && auth.currentUser?.uid === profile.id && auth.currentUser.emailVerified; }
+  static clear() { profile = null; progress = {}; logs = []; challenges = []; events = []; queue = []; publish('saved'); }
+  static async logout() {
+    if (draining) throw new Error('Espera a que termine el guardado.');
+    if (queue.length) { await this.flush(); if (queue.length) throw new Error('Hay avances sin guardar. Reintenta antes de cerrar sesión.'); }
+    await signOut(auth);
+    this.clear();
   }
-
-  static setAuthenticated(authenticated: boolean) {
-    try {
-      localStorage.setItem(SESSION_AUTH_KEY, authenticated ? 'true' : 'false');
-    } catch (e) {
-      console.warn('Could not set session auth in storage');
-    }
+  static async load(account: User, identity?: { name: string; lastName: string; courseGroup: string; nickname?: string }) {
+    if (!account.emailVerified) throw new Error('Verifica tu correo antes de ingresar.');
+    const uid = account.uid;
+    const [teacher, saved, missions, answers, weekly, courseEvents] = await Promise.all([
+      getDoc(doc(db, 'teachers', uid)), getDoc(doc(db, 'users', uid)),
+      getDocs(collection(db, 'users', uid, 'progress')),
+      getDocs(collection(db, 'users', uid, 'answers')),
+      getDocs(collection(db, 'weeklyChallenges')), getDocs(collection(db, 'courseEvents')),
+    ]);
+    if (auth.currentUser?.uid !== uid) return null;
+    const role = teacher.data()?.role === 'teacher' ? 'teacher' : 'student';
+    if (!saved.exists() && !identity) return null;
+    const user = saved.exists() ? { ...saved.data(), id: uid, email: account.email!, role } as UserProfile : {
+      id: uid, email: account.email!, name: identity!.name.trim(), lastName: identity!.lastName.trim(),
+      nickname: identity!.nickname?.trim() || ('Navegante-' + uid.slice(-6)), courseGroup: identity!.courseGroup, role,
+      avatar: '👨‍🚀', spaceship: 'Alfa', level: 1, xp: 0, cosmicCredits: 100, batteries: 3,
+      streakDays: 0, lastActiveDate: new Date().toISOString(), galaxiesExplored: 0, missionsCompleted: 0,
+      exercisesSolved: 0, accuracy: 0, bestStreak: 0,
+      unlockedItems: ['item-avatar-cadet', 'item-ship-alfa', 'item-trail-cyan', 'item-game-puzzle'],
+      equippedItems: { avatar: '👨‍🚀', spaceship: 'Alfa', trail: 'Plasma Cian', banner: '' }, badges: [],
+    } satisfies UserProfile;
+    if (!saved.exists()) await setDoc(doc(db, 'users', uid), user);
+    if (auth.currentUser?.uid !== uid) return null;
+    profile = user;
+    progress = Object.fromEntries(missions.docs.map(d => [d.id, d.data() as StudentMissionProgress]));
+    logs = answers.docs.map(d => d.data() as QuestionAnswerLog);
+    challenges = weekly.docs.map(d => d.data() as WeeklyChallenge);
+    events = courseEvents.docs.map(d => d.data() as CourseEvent);
+    publish('saved');
+    if (user.role === 'student') this.enqueue('leaderboard/' + uid, publicRankingEntry(user));
+    return user;
   }
-
-  static logout() {
-    this.setAuthenticated(false);
-  }
-
   static getUser(): UserProfile {
-    try {
-      const saved = localStorage.getItem(USER_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read user from storage, using initial state');
-    }
-    return INITIAL_STUDENT_USER;
+    if (!profile) throw new Error('Debes iniciar sesión.');
+    return clean(profile);
   }
-
+  private static enqueue(path: string, data: object) {
+    const uid = this.getUser().id;
+    queue.push({ uid, path, data: clean(data) });
+    publish('saving');
+    void this.flush();
+  }
+  static async flush() {
+    if (draining) return;
+    draining = true;
+    try {
+      while (queue.length) {
+        const job = queue[0];
+        if (auth.currentUser?.uid !== job.uid) throw new Error('Sesión cambiada');
+        await setDoc(doc(db, job.path), job.data);
+        if (queue[0] === job) queue.shift();
+      }
+      publish('saved');
+    } catch { publish('error'); }
+    finally { draining = false; }
+  }
   static saveUser(user: UserProfile) {
-    try {
-      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-      // Update entry in leaderboard too
-      this.updateUserInLeaderboard(user);
-    } catch (e) {
-      console.error('Error saving user to storage', e);
-    }
+    const current = this.getUser();
+    if (user.id !== current.id) throw new Error('Cuenta incorrecta');
+    profile = { ...clean(user), id: current.id, email: current.email, role: current.role };
+    profile.level = getLevelInfo(profile.xp).level;
+    if (JSON.stringify(profile) === JSON.stringify(current)) return;
+    this.enqueue('users/' + current.id, profile);
+    if (profile.role === 'student') this.enqueue('leaderboard/' + current.id, publicRankingEntry(profile));
   }
-
-  static getAllProgress(): Record<string, StudentMissionProgress> {
-    try {
-      const saved = localStorage.getItem(PROGRESS_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read progress from storage');
-    }
-
-    // Default initial mock progress
-    const initialProgress: Record<string, StudentMissionProgress> = {
-      'g1-m1': {
-        missionId: 'g1-m1',
-        completed: true,
-        stars: 3,
-        highScore: 60,
-        attemptsCount: 1,
-        errorsCount: 0,
-        lastAttemptDate: new Date().toISOString(),
-      },
-      'g1-m2': {
-        missionId: 'g1-m2',
-        completed: true,
-        stars: 2,
-        highScore: 50,
-        attemptsCount: 2,
-        errorsCount: 1,
-        lastAttemptDate: new Date().toISOString(),
-      },
-      'g1-m3': {
-        missionId: 'g1-m3',
-        completed: true,
-        stars: 3,
-        highScore: 40,
-        attemptsCount: 1,
-        errorsCount: 0,
-        lastAttemptDate: new Date().toISOString(),
-      },
-      'g2-m1': {
-        missionId: 'g2-m1',
-        completed: true,
-        stars: 2,
-        highScore: 60,
-        attemptsCount: 1,
-        errorsCount: 1,
-        lastAttemptDate: new Date().toISOString(),
-      },
-    };
-    return initialProgress;
+  static getAllProgress() { return clean(progress); }
+  static saveMissionProgress(value: StudentMissionProgress) {
+    const previous = progress[value.missionId];
+    const next = { ...value, completed: value.completed || !!previous?.completed,
+      stars: Math.max(value.stars, previous?.stars || 0),
+      highScore: Math.max(value.highScore, previous?.highScore || 0),
+      attemptsCount: (previous?.attemptsCount || 0) + 1 };
+    progress[next.missionId] = next;
+    this.enqueue('users/' + this.getUser().id + '/progress/' + next.missionId, next);
   }
-
-  static saveMissionProgress(progress: StudentMissionProgress) {
-    const all = this.getAllProgress();
-    all[progress.missionId] = progress;
-    try {
-      localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(all));
-    } catch (e) {
-      console.error('Error saving mission progress', e);
-    }
+  static getTotalStars() { return Object.values(progress).reduce((sum, p) => sum + p.stars, 0); }
+  static getLeaderboard(): LeaderboardEntry[] { return []; }
+  static getWeeklyChallenges() { return clean(challenges); }
+  static saveWeeklyChallenges(next: WeeklyChallenge[]) {
+    if (this.getUser().role !== 'teacher') throw new Error('Solo docentes');
+    challenges = clean(next);
+    next.forEach(c => this.enqueue('weeklyChallenges/' + c.id, c));
   }
-
-  static getTotalStars(): number {
-    const all = this.getAllProgress();
-    return Object.values(all).reduce((acc, p) => acc + (p.stars || 0), 0);
+  static getCourseEvents() { return clean(events); }
+  static saveCourseEvents(next: CourseEvent[]) {
+    if (this.getUser().role !== 'teacher') throw new Error('Solo docentes');
+    events = clean(next);
+    next.forEach(e => this.enqueue('courseEvents/' + e.id, e));
   }
-
-  static getLeaderboard(): LeaderboardEntry[] {
-    try {
-      const saved = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read leaderboard');
-    }
-    return MOCK_STUDENTS;
-  }
-
-  static updateUserInLeaderboard(user: UserProfile) {
-    const list = this.getLeaderboard();
-    const existingIndex = list.findIndex((item) => item.id === user.id || item.nickname === user.nickname);
-    const entry: LeaderboardEntry = {
-      id: user.id,
-      nickname: user.nickname,
-      name: user.name,
-      lastName: user.lastName,
-      avatar: user.avatar,
-      spaceship: user.spaceship,
-      level: user.level,
-      weeklyXP: user.xp, // for current user
-      monthlyXP: user.xp + 450,
-      allTimeXP: user.xp + 1200,
-      streakDays: user.streakDays,
-      courseGroup: user.courseGroup,
-    };
-
-    if (existingIndex >= 0) {
-      list[existingIndex] = entry;
-    } else {
-      list.push(entry);
-    }
-
-    try {
-      localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(list));
-    } catch (e) {
-      console.error('Error updating leaderboard', e);
-    }
-  }
-
-  static getWeeklyChallenges(): WeeklyChallenge[] {
-    try {
-      const saved = localStorage.getItem(CHALLENGES_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read challenges');
-    }
-    return WEEKLY_CHALLENGES;
-  }
-
-  static saveWeeklyChallenges(challenges: WeeklyChallenge[]) {
-    try {
-      localStorage.setItem(CHALLENGES_STORAGE_KEY, JSON.stringify(challenges));
-    } catch (e) {
-      console.error('Error saving challenges', e);
-    }
-  }
-
-  static getCourseEvents(): CourseEvent[] {
-    try {
-      const saved = localStorage.getItem(EVENTS_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read events');
-    }
-    return COURSE_EVENTS;
-  }
-
-  static saveCourseEvents(events: CourseEvent[]) {
-    try {
-      localStorage.setItem(EVENTS_STORAGE_KEY, JSON.stringify(events));
-    } catch (e) {
-      console.error('Error saving events', e);
-    }
-  }
-
   static rechargeOneBattery(user: UserProfile): UserProfile {
     const updated = {
       ...user,
@@ -354,173 +252,24 @@ export class StorageService {
     return updatedUser;
   }
 
-  static getQuestionLogs(): QuestionAnswerLog[] {
-    try {
-      const saved = localStorage.getItem(QUESTION_LOGS_STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not read question logs from storage');
-    }
 
-    // Default seeded answer logs for the cohort analysis
-    const seededLogs: QuestionAnswerLog[] = [
-      {
-        id: 'log-seed-1',
-        questionId: 'g1-m1-q1',
-        studentId: 'student-main',
-        missionId: 'g1-m1',
-        numberOfAttempts: 1,
-        correct: true,
-        firstAttemptCorrect: true,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 5).toISOString(),
-      },
-      {
-        id: 'log-seed-2',
-        questionId: 'g1-m1-q2',
-        studentId: 'student-main',
-        missionId: 'g1-m1',
-        numberOfAttempts: 2,
-        correct: true,
-        firstAttemptCorrect: false,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 4.8).toISOString(),
-      },
-      {
-        id: 'log-seed-3',
-        questionId: 'g1-m1-q3',
-        studentId: 'student-main',
-        missionId: 'g1-m1',
-        numberOfAttempts: 1,
-        correct: true,
-        firstAttemptCorrect: true,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 4.5).toISOString(),
-      },
-      {
-        id: 'log-seed-4',
-        questionId: 'g1-m2-q1',
-        studentId: 'student-main',
-        missionId: 'g1-m2',
-        numberOfAttempts: 2,
-        correct: false,
-        firstAttemptCorrect: false,
-        batteryLost: true,
-        timestamp: new Date(Date.now() - 3600000 * 3).toISOString(),
-      },
-      {
-        id: 'log-seed-5',
-        questionId: 'g1-m2-q2',
-        studentId: 'student-main',
-        missionId: 'g1-m2',
-        numberOfAttempts: 1,
-        correct: true,
-        firstAttemptCorrect: true,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 2.8).toISOString(),
-      },
-      // Other student logs in cohort
-      {
-        id: 'log-seed-6',
-        questionId: 'g1-m1-q1',
-        studentId: 'std-1',
-        missionId: 'g1-m1',
-        numberOfAttempts: 1,
-        correct: true,
-        firstAttemptCorrect: true,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 12).toISOString(),
-      },
-      {
-        id: 'log-seed-7',
-        questionId: 'g1-m1-q2',
-        studentId: 'std-1',
-        missionId: 'g1-m1',
-        numberOfAttempts: 1,
-        correct: true,
-        firstAttemptCorrect: true,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 11.8).toISOString(),
-      },
-      {
-        id: 'log-seed-8',
-        questionId: 'g1-m1-q3',
-        studentId: 'std-3',
-        missionId: 'g1-m1',
-        numberOfAttempts: 2,
-        correct: true,
-        firstAttemptCorrect: false,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 10).toISOString(),
-      },
-      {
-        id: 'log-seed-9',
-        questionId: 'g2-m1-q1',
-        studentId: 'std-4',
-        missionId: 'g2-m1',
-        numberOfAttempts: 2,
-        correct: false,
-        firstAttemptCorrect: false,
-        batteryLost: true,
-        timestamp: new Date(Date.now() - 3600000 * 8).toISOString(),
-      },
-      {
-        id: 'log-seed-10',
-        questionId: 'g4-m1-q1',
-        studentId: 'std-5',
-        missionId: 'g4-m1',
-        numberOfAttempts: 2,
-        correct: true,
-        firstAttemptCorrect: false,
-        batteryLost: false,
-        timestamp: new Date(Date.now() - 3600000 * 6).toISOString(),
-      },
-    ];
-
-    try {
-      localStorage.setItem(QUESTION_LOGS_STORAGE_KEY, JSON.stringify(seededLogs));
-    } catch (e) {
-      console.warn('Could not seed initial question logs');
-    }
-
-    return seededLogs;
-  }
-
+  static getQuestionLogs() { return clean(logs); }
   static saveQuestionLog(log: QuestionAnswerLog) {
-    const logs = this.getQuestionLogs();
-    logs.push(log);
-    try {
-      localStorage.setItem(QUESTION_LOGS_STORAGE_KEY, JSON.stringify(logs));
-    } catch (e) {
-      console.error('Error saving question log to storage', e);
-    }
+    const own = { ...log, studentId: this.getUser().id };
+    logs.push(own);
+    this.enqueue('users/' + own.studentId + '/answers/' + own.id, own);
   }
-
-  static getQuestionLogsForStudent(studentId: string): QuestionAnswerLog[] {
-    const logs = this.getQuestionLogs();
-    return logs.filter((l) => l.studentId === studentId);
-  }
-
+  static getQuestionLogsForStudent(id: string) { return logs.filter(l => l.studentId === id); }
   static getCohortAttemptStats() {
-    const logs = this.getQuestionLogs();
     const totalLogs = logs.length;
-    const firstAttemptSuccess = logs.filter((l) => l.firstAttemptCorrect).length;
-    const secondAttemptSuccess = logs.filter((l) => !l.firstAttemptCorrect && l.correct).length;
-    const failedAfterTwoAttempts = logs.filter((l) => !l.correct && l.numberOfAttempts >= 2).length;
-    const totalBatteriesLost = logs.filter((l) => l.batteryLost).length;
-
-    return {
-      totalLogs,
-      firstAttemptSuccess,
-      secondAttemptSuccess,
-      failedAfterTwoAttempts,
-      totalBatteriesLost,
-      firstAttemptPercent: totalLogs > 0 ? Math.round((firstAttemptSuccess / totalLogs) * 100) : 70,
-      secondAttemptPercent: totalLogs > 0 ? Math.round((secondAttemptSuccess / totalLogs) * 100) : 20,
-      failedPercent: totalLogs > 0 ? Math.round((failedAfterTwoAttempts / totalLogs) * 100) : 10,
-    };
+    const firstAttemptSuccess = logs.filter(l => l.firstAttemptCorrect).length;
+    const secondAttemptSuccess = logs.filter(l => !l.firstAttemptCorrect && l.correct).length;
+    const failedAfterTwoAttempts = logs.filter(l => !l.correct && l.numberOfAttempts >= 2).length;
+    const percent = (n: number) => totalLogs ? Math.round(100 * n / totalLogs) : 0;
+    return { totalLogs, firstAttemptSuccess, secondAttemptSuccess, failedAfterTwoAttempts,
+      totalBatteriesLost: logs.filter(l => l.batteryLost).length,
+      firstAttemptPercent: percent(firstAttemptSuccess), secondAttemptPercent: percent(secondAttemptSuccess),
+      failedPercent: percent(failedAfterTwoAttempts) };
   }
 }
 
