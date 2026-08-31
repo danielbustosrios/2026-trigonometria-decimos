@@ -1,0 +1,96 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isTeacher() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher'
+      );
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'email', 'name', 'nickname', 'role', 'level', 'xp', 'batteries']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.email is string && data.email.size() <= 256 &&
+        data.name is string && data.name.size() <= 100 &&
+        data.nickname is string && data.nickname.size() <= 50 &&
+        data.role in ['student', 'teacher'] &&
+        data.level is number && data.level >= 1 &&
+        data.xp is number && data.xp >= 0 &&
+        data.batteries is number && data.batteries >= 0 && data.batteries <= 3;
+    }
+
+    function isValidProgress(data) {
+      return data.keys().hasAll(['missionId', 'userId', 'completed', 'stars']) &&
+        data.missionId is string && data.missionId.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.completed is bool &&
+        data.stars is number && data.stars >= 0 && data.stars <= 3;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isTeacher();
+      allow list: if isTeacher();
+      
+      // On create, students cannot set themselves as teacher
+      allow create: if isSignedIn() && isOwner(userId) && isValidId(userId) &&
+        isValidUser(incoming()) && (incoming().role == 'student' || isTeacher());
+      
+      // On update, users cannot change their role or email
+      allow update: if (isOwner(userId) && isValidUser(incoming()) &&
+        incoming().role == existing().role &&
+        incoming().id == existing().id &&
+        incoming().email == existing().email) || isTeacher();
+      
+      allow delete: if isTeacher();
+
+      // Subcollection for mission progress
+      match /progress/{missionId} {
+        allow get, list: if isOwner(userId) || isTeacher();
+        allow create, update: if isOwner(userId) && isValidId(missionId) &&
+          isValidProgress(incoming()) && incoming().userId == userId;
+        allow delete: if isTeacher();
+      }
+    }
+
+    // Weekly challenges
+    match /weeklyChallenges/{challengeId} {
+      allow read: if isSignedIn();
+      allow write: if isTeacher();
+    }
+
+    // Leaderboard cache collection
+    match /leaderboard/{entryId} {
+      allow read: if isSignedIn();
+      allow write: if isTeacher() || (isSignedIn() && incoming().id == request.auth.uid);
+    }
+  }
+}

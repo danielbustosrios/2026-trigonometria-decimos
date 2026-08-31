@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile containing academic credentials and game progression metrics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "name": { "type": "string", "maxLength": 100 },
+        "lastName": { "type": "string", "maxLength": 100 },
+        "nickname": { "type": "string", "maxLength": 50 },
+        "courseGroup": { "type": "string", "maxLength": 30 },
+        "role": { "type": "string", "enum": ["student", "teacher"] },
+        "avatar": { "type": "string", "maxLength": 100 },
+        "spaceship": { "type": "string", "maxLength": 100 },
+        "level": { "type": "number" },
+        "xp": { "type": "number" },
+        "cosmicCredits": { "type": "number" },
+        "batteries": { "type": "number" },
+        "streakDays": { "type": "number" },
+        "lastActiveDate": { "type": "string", "maxLength": 100 },
+        "galaxiesExplored": { "type": "number" },
+        "missionsCompleted": { "type": "number" },
+        "exercisesSolved": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "bestStreak": { "type": "number" }
+      },
+      "required": ["id", "email", "name", "nickname", "role", "level", "xp", "batteries"]
+    },
+    "StudentProgress": {
+      "title": "StudentProgress",
+      "description": "Per-mission performance tracking including stars, attempts, errors and high scores",
+      "type": "object",
+      "properties": {
+        "missionId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "completed": { "type": "boolean" },
+        "stars": { "type": "number" },
+        "highScore": { "type": "number" },
+        "attemptsCount": { "type": "number" },
+        "errorsCount": { "type": "number" },
+        "lastAttemptDate": { "type": "string", "maxLength": 100 }
+      },
+      "required": ["missionId", "userId", "completed", "stars"]
+    },
+    "WeeklyChallenge": {
+      "title": "WeeklyChallenge",
+      "description": "Course-wide or global weekly challenges and goals",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 150 },
+        "description": { "type": "string", "maxLength": 500 },
+        "targetCount": { "type": "number" },
+        "currentCount": { "type": "number" },
+        "xpReward": { "type": "number" },
+        "creditsReward": { "type": "number" },
+        "isCompleted": { "type": "boolean" }
+      },
+      "required": ["id", "title", "targetCount", "xpReward"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    },
+    "/users/{userId}/progress/{missionId}": {
+      "schema": "StudentProgress",
+      "description": "Individual mission progress for a specific student"
+    },
+    "/weeklyChallenges/{challengeId}": {
+      "schema": "WeeklyChallenge",
+      "description": "Weekly course missions"
+    }
+  }
+}

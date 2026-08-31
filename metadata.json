@@ -1,0 +1,6 @@
+{
+  "name": "Laboratorio de trigonometría Vieco",
+  "description": "Plataforma educativa espacial, gamificada e interactiva de matemáticas y trigonometría para grado 10° con misiones, sistema de energía, mapa estelar y centro de mando.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
